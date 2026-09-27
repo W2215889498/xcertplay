@@ -120,6 +120,26 @@ internal fun isWirelessHandoffInProgress(
 ): Boolean = handoffRequested || tunnelActive || sessionActive
 
 /**
+ * Parses a hotspot BSSID for the 0x5703 optional parameter.
+ *
+ * Android hides the Wi-Fi Direct group-owner MAC behind 02:00:00:00:00:00, and an all-zero
+ * address is equally useless, so both are reported as "unknown" (null) instead.
+ */
+internal fun usableHotspotBssid(value: String?): ByteArray? {
+    val parts = value?.trim()?.split(':') ?: return null
+    if (parts.size != 6) return null
+    val bytes = ByteArray(6)
+    for (index in 0 until 6) {
+        val octet = parts[index].toIntOrNull(16) ?: return null
+        if (octet !in 0..0xff) return null
+        bytes[index] = octet.toByte()
+    }
+    if (bytes.all { it == 0.toByte() }) return null
+    if (bytes[0] == 0x02.toByte() && bytes.copyOfRange(1, 6).all { it == 0.toByte() }) return null
+    return bytes
+}
+
+/**
  * Wires the complete wired or wireless CarPlay path: MFi coprocessor discovery, iPhone bring-up,
  * iAP2 control, transport setup, and the AirPlay media/input sessions.
  *
@@ -855,6 +875,7 @@ class CarPlayController(
                 deviceIdentifier = deviceIdentifier,
                 publicKey = identity.publicKeyHex,
                 sourceVersion = airPlayConfig.sourceVersion,
+                bssid = usableHotspotBssid(hotspotInfo.bssid),
             )
             wirelessIdentification = identification
             wirelessAirPlayEndpoint = endpoint
@@ -1041,25 +1062,14 @@ class CarPlayController(
                 ) {
                     return@postDelayed
                 }
-                debugLog("wireless handoff timed out waiting for tunnel iAP2 readiness")
-                Thread(
-                    {
-                        if (
-                            closed ||
-                            phase != Phase.WIRELESS ||
-                            generation != wirelessGeneration.get() ||
-                            wirelessActiveReported.get()
-                        ) {
-                            return@Thread
-                        }
-                        closeWirelessStack()
-                        fail(IOException("Wireless CarPlay handoff timed out waiting for tunnel iAP2"))
-                    },
-                    "xcertplay-wireless-handoff-timeout",
-                ).apply {
-                    isDaemon = true
-                    start()
-                }
+                // The Wi-Fi iAP tunnel is optional: older iPhones keep iAP2 on Bluetooth and
+                // never open the type-130 channel. Tearing the session down here killed a
+                // working CarPlay session, so only report the timeout and keep the current
+                // transport running.
+                debugLog(
+                    "wireless handoff tunnel did not appear within " +
+                        "${WIRELESS_HANDOFF_TIMEOUT_MILLIS}ms; keeping the Bluetooth iAP2 session",
+                )
             },
             WIRELESS_HANDOFF_TIMEOUT_MILLIS,
         )
