@@ -2802,10 +2802,19 @@ class CarPlayHostActivity : ComponentActivity() {
         videoHeight = videoHeight,
         preferSoftwareHevcDecoder = hevcSoftwareDecoderEnabled,
         advancedAudioChannelMapping = advancedAudioChannelMapping,
+        videoDumpDirectory = videoDumpDirectory(),
         onScreenStreamActiveChanged = { type, active ->
             onScreenStreamStateChanged(controllerGeneration, type, active)
         },
     )
+
+    private fun videoDumpDirectory(): File? =
+        if (!debugLogsEnabled) {
+            null
+        } else {
+            val base = getExternalFilesDir(null) ?: filesDir
+            File(base, "video-dump")
+        }
 
     private fun createMediaEngine(sink: AndroidMediaSink): CarPlayMediaEngine =
         CarPlayMediaEngine(

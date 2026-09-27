@@ -30,6 +30,7 @@ class ScreenStream(private val key: ByteArray) : Closeable {
     private val closed = AtomicBoolean(false)
     private val frameCounter = AtomicLong(0)
     private val firstFrameLogged = AtomicBoolean(false)
+    private val notAnnexBLogged = AtomicBoolean(false)
     private var server: ServerSocket? = null
     private var socket: Socket? = null
     private var thread: Thread? = null
@@ -98,7 +99,18 @@ class ScreenStream(private val key: ByteArray) : Closeable {
                         "head=${payload.hexPrefix(16)}",
                     )
                 }
-                listener.onFrame(ScreenCodec.lengthPrefixedToAnnexB(payload))
+                val annexB = ScreenCodec.lengthPrefixedToAnnexB(payload)
+                if (
+                    !annexB.startsWithStartCode() &&
+                    notAnnexBLogged.compareAndSet(false, true)
+                ) {
+                    Log.w(
+                        TAG,
+                        "video frame is not annexB sealed=${body.size} plain=${payload.size} " +
+                            "head=${annexB.hexPrefix(16)}",
+                    )
+                }
+                listener.onFrame(annexB)
             }
             OP_VIDEO_CONFIG -> {
                 val (codec, codecData) = ScreenCodec.detectConfig(body)

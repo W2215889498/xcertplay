@@ -15,7 +15,10 @@ import com.shilapi.xcertplay.airplay.MediaSink
 import com.shilapi.xcertplay.airplay.MicrophoneConfig
 import com.shilapi.xcertplay.airplay.VideoCodec
 import com.shilapi.xcertplay.airplay.toHexString
+import java.io.BufferedOutputStream
 import java.io.Closeable
+import java.io.File
+import java.io.FileOutputStream
 import java.nio.ByteBuffer
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.LinkedBlockingQueue
@@ -31,6 +34,7 @@ class AndroidMediaSink(
     private val videoHeight: Int = 720,
     private val preferSoftwareHevcDecoder: Boolean = false,
     private val advancedAudioChannelMapping: Boolean = false,
+    private val videoDumpDirectory: File? = null,
     onScreenStreamActiveChanged: ((Int, Boolean) -> Unit)? = null,
 ) : MediaSink {
     private val defaultSurface = surface
@@ -108,6 +112,8 @@ class AndroidMediaSink(
                 videoWidth,
                 videoHeight,
                 preferSoftwareHevcDecoder,
+                type,
+                videoDumpDirectory,
             )
         }
 
@@ -132,6 +138,8 @@ private class VideoDecoder(
     private val width: Int,
     private val height: Int,
     private val preferSoftwareHevcDecoder: Boolean,
+    private val streamType: Int,
+    private val dumpDirectory: File?,
 ) : Closeable {
     private val queue = LinkedBlockingQueue<VideoJob>()
     @Volatile private var running = true
@@ -141,6 +149,13 @@ private class VideoDecoder(
     private var renderedFrameLogged = false
     private var submittedFrameLogged = false
     private var duplicateConfigLogged = false
+    private var inputFrames = 0
+    private var outputFrames = 0
+    private var inputDropped = 0
+    private var inputOversized = 0
+    private var dumpStream: BufferedOutputStream? = null
+    private var dumpBytes = 0L
+    private var dumpFrames = 0
     private val thread = Thread(::run, "carplay-video").apply { isDaemon = true; start() }
 
     fun configure(codec: VideoCodec, codecData: ByteArray) {
@@ -206,13 +221,17 @@ private class VideoDecoder(
         val format = MediaFormat.createVideoFormat(mime, width, height).apply {
             setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, MAX_INPUT_SIZE)
         }
-        if (codec == VideoCodec.H265) {
+        val parameterSets = if (codec == VideoCodec.H265) {
             val csd = MediaCodecSupport.hevcCodecSpecificData(codecData)
             if (csd.isNotEmpty()) format.setByteBuffer("csd-0", ByteBuffer.wrap(csd))
+            csd
         } else {
             val (sps, pps) = MediaCodecSupport.avcParameterSets(codecData)
-            if (sps.isNotEmpty()) format.setByteBuffer("csd-0", ByteBuffer.wrap(START_CODE + sps))
-            if (pps.isNotEmpty()) format.setByteBuffer("csd-1", ByteBuffer.wrap(START_CODE + pps))
+            val spsBytes = if (sps.isNotEmpty()) START_CODE + sps else ByteArray(0)
+            val ppsBytes = if (pps.isNotEmpty()) START_CODE + pps else ByteArray(0)
+            if (spsBytes.isNotEmpty()) format.setByteBuffer("csd-0", ByteBuffer.wrap(spsBytes))
+            if (ppsBytes.isNotEmpty()) format.setByteBuffer("csd-1", ByteBuffer.wrap(ppsBytes))
+            spsBytes + ppsBytes
         }
         val next = try {
             createDecoder(mime).also {
@@ -231,7 +250,51 @@ private class VideoDecoder(
                 TAG,
                 "video decoder configured name=${next.name} mime=$mime size=${width}x$height",
             )
+            openDump(codec, parameterSets)
         }
+    }
+
+    private fun openDump(codec: VideoCodec, parameterSets: ByteArray) {
+        closeDump()
+        val directory = dumpDirectory ?: return
+        val suffix = if (codec == VideoCodec.H265) "h265" else "h264"
+        val file = runCatching {
+            directory.mkdirs()
+            File(directory, "video-$streamType-${System.currentTimeMillis()}.$suffix")
+        }.getOrNull() ?: return
+        val stream = runCatching { BufferedOutputStream(FileOutputStream(file)) }.getOrNull() ?: return
+        dumpStream = stream
+        dumpBytes = 0
+        dumpFrames = 0
+        if (parameterSets.isNotEmpty()) {
+            runCatching { stream.write(parameterSets) }
+            dumpBytes += parameterSets.size
+        }
+        Log.i(TAG, "video dump started file=${file.absolutePath}")
+    }
+
+    private fun writeDump(annexB: ByteArray) {
+        val stream = dumpStream ?: return
+        if (dumpBytes >= DUMP_LIMIT_BYTES) return
+        try {
+            stream.write(annexB)
+            dumpBytes += annexB.size
+            dumpFrames++
+            if (dumpBytes >= DUMP_LIMIT_BYTES) {
+                stream.flush()
+                Log.i(TAG, "video dump complete frames=$dumpFrames bytes=$dumpBytes")
+                closeDump()
+            }
+        } catch (error: Exception) {
+            Log.w(TAG, "video dump write failed", error)
+            closeDump()
+        }
+    }
+
+    private fun closeDump() {
+        val stream = dumpStream ?: return
+        dumpStream = null
+        runCatching { stream.close() }
     }
 
     private fun createDecoder(mime: String): MediaCodec {
@@ -287,15 +350,42 @@ private class VideoDecoder(
             )
         }
         if (annexB.isEmpty()) return
-        val index = codec.dequeueInputBuffer(INPUT_TIMEOUT_US)
-        if (index < 0) return
+        writeDump(annexB)
+        var index = codec.dequeueInputBuffer(INPUT_TIMEOUT_US)
+        val inputDeadline = System.nanoTime() + INPUT_WAIT_NANOS
+        while (index < 0 && running && System.nanoTime() < inputDeadline) {
+            drainOutput(codec)
+            index = codec.dequeueInputBuffer(INPUT_TIMEOUT_US)
+        }
+        if (index < 0) {
+            inputDropped++
+            if (inputDropped == 1 || inputDropped % VIDEO_FRAME_LOG_INTERVAL == 0) {
+                Log.w(
+                    TAG,
+                    "video decoder input unavailable queued=$inputFrames dropped=$inputDropped",
+                )
+            }
+            return
+        }
         val input = codec.getInputBuffer(index) ?: return
         input.clear()
         if (annexB.size <= input.remaining()) {
             input.put(annexB)
             codec.queueInputBuffer(index, 0, annexB.size, System.nanoTime() / 1000, 0)
         } else {
+            inputOversized++
+            if (inputOversized == 1 || inputOversized % VIDEO_FRAME_LOG_INTERVAL == 0) {
+                Log.w(
+                    TAG,
+                    "video decoder frame oversized bytes=${annexB.size} " +
+                        "capacity=${input.capacity()} count=$inputOversized",
+                )
+            }
             codec.queueInputBuffer(index, 0, 0, 0, 0)
+        }
+        inputFrames++
+        if (inputFrames <= 3 || inputFrames % VIDEO_FRAME_LOG_INTERVAL == 0) {
+            Log.i(TAG, "video decoder input frames=$inputFrames bytes=${annexB.size}")
         }
         drainOutput(codec)
     }
@@ -310,6 +400,15 @@ private class VideoDecoder(
                 index >= 0 -> {
                     val render = outputSurface != null
                     codec.releaseOutputBuffer(index, render)
+                    if (render) {
+                        outputFrames++
+                        if (outputFrames <= 3 || outputFrames % VIDEO_FRAME_LOG_INTERVAL == 0) {
+                            Log.i(
+                                TAG,
+                                "video decoder output frames=$outputFrames bytes=${info.size}",
+                            )
+                        }
+                    }
                     if (render && !renderedFrameLogged) {
                         renderedFrameLogged = true
                         Log.i(TAG, "video decoder rendered first frame bytes=${info.size}")
@@ -337,6 +436,7 @@ private class VideoDecoder(
 
     @Synchronized
     private fun releaseDecoder() {
+        closeDump()
         val codec = decoder
         decoder = null
         if (codec != null) {
@@ -357,6 +457,9 @@ private class VideoDecoder(
         const val TAG = "xcertplay-usb"
         const val MAX_INPUT_SIZE = 8 * 1024 * 1024
         const val INPUT_TIMEOUT_US = 10_000L
+        const val VIDEO_FRAME_LOG_INTERVAL = 60
+        const val DUMP_LIMIT_BYTES = 8L * 1024 * 1024
+        const val INPUT_WAIT_NANOS = 1_000_000_000L
         val START_CODE = byteArrayOf(0x00, 0x00, 0x00, 0x01)
     }
 }
