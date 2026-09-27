@@ -63,7 +63,7 @@ class WifiP2pGroupManager(context: Context) : WirelessHotspotManager {
         val thread = HandlerThread("xcertplay-wifi-p2p").apply { start() }
         attempt.thread = thread
         val deadlineNanos = deadlineAfter(timeoutMillis)
-        val credentials = randomCredentials()
+        val credentials = stableCredentials()
 
         try {
             val p2pChannel = p2pManager.initialize(
@@ -366,10 +366,23 @@ class WifiP2pGroupManager(context: Context) : WirelessHotspotManager {
         }
     }
 
-    private fun randomCredentials(): Credentials = Credentials(
-        ssid = "DIRECT-xc${randomToken(4)}",
-        passphrase = randomToken(16),
-    )
+    private fun stableCredentials(): Credentials {
+        val preferences = appContext.getSharedPreferences(CREDENTIALS_PREFS, Context.MODE_PRIVATE)
+        val storedSsid = preferences.getString(KEY_SSID, null)
+        val storedPassphrase = preferences.getString(KEY_PASSPHRASE, null)
+        if (!storedSsid.isNullOrBlank() && !storedPassphrase.isNullOrBlank()) {
+            return Credentials(storedSsid, storedPassphrase)
+        }
+        val generated = Credentials(
+            ssid = "DIRECT-xc${randomToken(4)}",
+            passphrase = randomToken(16),
+        )
+        preferences.edit()
+            .putString(KEY_SSID, generated.ssid)
+            .putString(KEY_PASSPHRASE, generated.passphrase)
+            .apply()
+        return generated
+    }
 
     private fun randomToken(length: Int): String =
         buildString(length) {
@@ -487,6 +500,9 @@ class WifiP2pGroupManager(context: Context) : WirelessHotspotManager {
 
     private companion object {
         const val TAG = "xcertplay-usb"
+        const val CREDENTIALS_PREFS = "xcertplay-wifi-p2p"
+        const val KEY_SSID = "wifi_p2p_ssid"
+        const val KEY_PASSPHRASE = "wifi_p2p_passphrase"
         const val NANOS_PER_MILLISECOND = 1_000_000L
         const val REMOVE_GROUP_TIMEOUT_MILLIS = 2_000L
         val REQUEST_POLL_NANOS: Long = TimeUnit.MILLISECONDS.toNanos(500)
