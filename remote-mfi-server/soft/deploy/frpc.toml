@@ -1,0 +1,28 @@
+# 方案 B：签名服务在 NAT 后面（例如放证书的 Mac 或家里的小主机），云服务器用 frp 中转
+# 拓扑： 车机 --(公网 IP:PORT)--> frps(云服务器) --(frp 隧道)--> frpc(内网主机) --> 本地 8080
+#
+# 云服务器 frps.toml:
+#   bindPort = 7000
+#   auth.method = "token"
+#   auth.token = "frp-shared-secret"
+# 云服务器安全组开放：7000/tcp（frp 控制）与下面 remotePort 指定的端口，例如 18080/tcp
+#
+# 内网主机运行本文件（frpc -c frpc.toml）
+
+serverAddr = "your-cloud-ip"
+serverPort = 7000
+auth.method = "token"
+auth.token = "frp-shared-secret"
+
+[[proxies]]
+name = "xcertplay-mfi"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = 8080
+remotePort = 18080
+
+# App 里填：http://your-cloud-ip:18080
+# 注意：这是明文 TCP 转发。若要 HTTPS：
+#   1) 云服务器上放 Caddy/nginx，用域名 TLS 反代到 127.0.0.1:18080（需 80/443）；或
+#   2) 本地用 uvicorn --ssl-* 直接起 HTTPS，上面的 localPort 改成 8443；
+#      自签证书 Android 默认不信任，需要在设备上安装 CA，或使用受信任证书。

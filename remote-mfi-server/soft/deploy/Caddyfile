@@ -1,0 +1,11 @@
+# 方案 A：云服务器直接对外（推荐，车机有以太网/4G 上行时）
+# Caddy 自动申请 Let's Encrypt 证书，App 里直接填 https://mfi.example.com
+# 需要：域名 mfi.example.com 解析到这台云服务器；开放 80/443。
+
+mfi.example.com {
+    encode gzip
+    # 可选：限制来源（车机固定出口 IP 时更安全）
+    # @allowed remote_ip 1.2.3.4/32
+    # handle @allowed { ... }
+    reverse_proxy 127.0.0.1:8080
+}

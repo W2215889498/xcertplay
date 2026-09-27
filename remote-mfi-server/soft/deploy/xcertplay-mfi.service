@@ -1,0 +1,30 @@
+[Unit]
+Description=xcertplay remote MFi/BAA authentication service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=xcertplay
+Group=xcertplay
+WorkingDirectory=/opt/xcertplay-mfi
+# 证书与私钥只给这个用户读
+Environment=MFI_TYPE=baa
+Environment=MFI_PROTOCOL_MAJOR=2
+Environment=MFI_LEAF_DER=/opt/xcertplay-mfi/secrets/leaf.der
+Environment=MFI_INTERMEDIATE_DER=/opt/xcertplay-mfi/secrets/intermediate.der
+Environment=MFI_KEY_PEM=/opt/xcertplay-mfi/secrets/leaf-key.pem
+# 可选：取消注释并填写 Bearer Token（App 设置里也要填一致的 Token）
+#Environment=MFI_TOKEN=change-me
+# 只监听本机，由 Caddy/nginx/frps 负责对外 TLS
+ExecStart=/opt/xcertplay-mfi/venv/bin/uvicorn server:app --host 127.0.0.1 --port 8080
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/opt/xcertplay-mfi
+
+[Install]
+WantedBy=multi-user.target
