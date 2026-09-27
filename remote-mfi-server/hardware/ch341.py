@@ -181,7 +181,16 @@ class Ch341I2c:
 
         if usb is None:
             raise Ch341Error("pyusb is not installed (pip install pyusb)")
-        device = usb.core.find(idVendor=vendor_id, idProduct=product_id)
+        # Windows: libusb-package ships libusb-1.0.dll; use it when available so no manual
+        # DLL placement is needed. On Linux/macOS the default backend is used.
+        backend = None
+        try:
+            import libusb_package  # type: ignore
+
+            backend = libusb_package.get_libusb1_backend()
+        except ImportError:
+            pass
+        device = usb.core.find(idVendor=vendor_id, idProduct=product_id, backend=backend)
         if device is None:
             raise Ch341Error(f"CH341 not found (VID 0x{vendor_id:04x} PID 0x{product_id:04x})")
         self.device = device

@@ -25,7 +25,7 @@
 
 ```bash
 sudo apt install libusb-1.0-0
-python3 -m venv venv && ./venv/bin/pip install pyusb fastapi uvicorn
+python3 -m venv venv && ./venv/bin/pip install pyusb libusb-package fastapi uvicorn
 
 # 让普通用户能访问 CH341（推荐，避免 root 运行服务）
 sudo tee /etc/udev/rules.d/99-ch341-xcertplay.rules <<'EOF'
@@ -59,6 +59,7 @@ curl -s localhost:8080/mfi/health
 
 ## 5. 说明与注意事项
 
+- **Windows 11 也可以**：`python -m venv venv` → `venv\Scripts\pip install pyusb libusb-package fastapi uvicorn`；用 **Zadig** 把 CH341（VID 1A86 / PID 5512）驱动换成 **WinUSB**；代码会自动通过 `libusb_package` 找到 `libusb-1.0.dll`，无需手工放置。换驱动后该 CH341 不能当串口用，可在设备管理器回滚。首次启动 uvicorn 时放行防火墙端口。
 - 本目录是**照仓库逻辑移植的实现**，与 Android 端寄存器/流包编码逐条对应；我这边没有 CH341+芯片实物，未能实机验证——第一次跑请先用上面的自检脚本确认能读到证书。
 - 签名返回的是芯片原始签名（MFi 2.0C 通常 128/256 字节）；`type=mfi` 下客户端会把证书原样用于 iAP2 0xAA01。
 - 总线上同一时刻只允许一个事务：服务内部已加锁（FastAPI 可能并发请求）。

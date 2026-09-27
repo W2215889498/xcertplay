@@ -17,6 +17,38 @@ xcertplay 车机端的 `MFI target = Remote` 只需要一个实现三个接口�
 
 可选 `Authorization: Bearer <token>`；失败返回非 2xx + `{"detail":"..."}`。
 
+## 系统要求：Windows 11 可以吗？
+
+**都可以，服务本身是纯 Python（FastAPI + pyusb），Windows 11 正常运行。** 区别在驱动和常驻方式：
+
+| | Linux | Windows 11 |
+|---|---|---|
+| `soft/`（Apple 证书） | 直接 `uvicorn` + systemd | 直接 `uvicorn`；常驻用任务计划程序或 NSSM |
+| `hardware/`（CH341 + 芯片） | udev 规则免 root | 需用 **Zadig** 把 CH341 的驱动换成 WinUSB/libusb（一次性），并把 `libusb-1.0.dll` 提供给 pyusb（`pip install libusb-package` 即可，代码会自动使用它） |
+| 对外 TLS | Caddy/systemd | Caddy 有 Windows 版；或内网用 `http://` + Token |
+| frp | frpc Linux 版 | frp 有 Windows 版（`frpc.exe`） |
+
+Windows 11 硬件路线的完整步骤：
+
+```powershell
+# 1) 安装 Python 3.10+（勾选 Add to PATH）
+cd remote-mfi-server\hardware
+python -m venv venv
+venv\Scripts\pip install pyusb libusb-package fastapi uvicorn
+
+# 2) 用 Zadig 给 CH341 换驱动：Options -> List All Devices
+#    选中 "USB-EPI/I2C..." (VID 1A86 / PID 5512) -> 安装 WinUSB
+#    （换成 WinUSB 后该设备不能再当串口用；Device Manager 里可回滚）
+
+# 3) 自检
+venv\Scripts\python -c "from ch341 import Ch341I2c; from mfi_chip import MfiChip; c=MfiChip(Ch341I2c()); print(c.protocol_major(), len(c.certificate()))"
+
+# 4) 启动（首次会弹 Windows 防火墙，记得允许专用/公用网络）
+venv\Scripts\uvicorn server:app --host 0.0.0.0 --port 8080
+```
+
+常驻：任务计划程序（启动时运行 + 失败重启）或 `nssm install xcertplay-mfi`（把 `venv\Scripts\uvicorn.exe` 和参数填进去）。
+
 ## App 端配置
 
 设置 → **MFI target = Remote** → **Server address**（必须 `http://` 或 `https://` 开头）→ **Token (optional)** 与服务端一致 → 保存并重连。
