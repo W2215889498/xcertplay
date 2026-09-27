@@ -60,6 +60,23 @@ mfi discovery backend=Remote server=http://...
 mfi remote service ready server=http://... protocolMajor=2
 ```
 
+## HTTP 还是 HTTPS？
+
+**不是必须 HTTPS。** 结论按网络环境选：
+
+- 客户端两种都收：`RemoteMfiAuthenticationClient` 只校验地址以 `http://` 或 `https://` 开头；
+- App 的 manifest 里显式开了 `android:usesCleartextTraffic="true"`，所以 `http://` 在 Android 9+ 上 **可以正常用**；
+- **自签 HTTPS 基本不可用**：App 没有 network security config，默认只信任系统 CA（不信任用户安装的 CA）。要用 HTTPS 就得是公网可信证书（域名 + Let's Encrypt 等）；
+- 明文 frp 转发（`type = "tcp"`）**不算加密**，跨公网时要么用 HTTPS，要么把隧道加密（frp `transport.tls.enable = true`，或 WireGuard/Tailscale/ZeroTier）。
+
+| 场景 | 建议 |
+|---|---|
+| 车机与服务同一内网/VPN | `http://` + 强 Bearer Token（够用） |
+| 跨公网（车机走 4G/以太网上云） | `https://`（真实证书）或加密隧道 + Token |
+| 只想快速验证功能 | 内网 `http://` 最省事 |
+
+安全提醒：`/mfi/sign` 本质是一个签名 oracle（谁都能拿它签任意 challenge），所以**无论 http 还是 https，都必须加 Token 并限制来源**；HTTP 的主要风险是 Token 明文传输。
+
 ## 选择建议
 
 - 手上有 MFi 芯片（你现在就是 CH341 + 芯片）：直接用 `hardware/`，把芯片插到服务器上即可，不需要任何 Apple 证书文件；
